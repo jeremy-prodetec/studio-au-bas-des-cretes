@@ -1,0 +1,6 @@
+# Configuration Netlify — Studio Au Bas des Crêtes
+[build]
+  publish = "."
+  functions = "netlify/functions"
+
+# Pas d'étape de build : le site est un simple fichier index.html
