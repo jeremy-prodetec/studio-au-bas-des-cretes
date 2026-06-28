@@ -1,7 +1,4 @@
 // Fonction Netlify : lecture/écriture du contenu de l'app (Netlify Blobs)
-// GET  -> renvoie le contenu courant (public)
-// POST -> { verify:true }  : vérifie le mot de passe (header x-admin-token)
-//         sinon            : enregistre le contenu (mot de passe requis)
 import { getStore } from '@netlify/blobs';
 
 const KEY = 'content';
@@ -12,11 +9,25 @@ const cors = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
 };
 
-export const handler = async (event) => {
-  const store = getStore('studio');
+function openStore() {
+  const siteID = process.env.NETLIFY_SITE_ID;
+  const token = process.env.NETLIFY_API_TOKEN;
+  if (siteID && token) {
+    return getStore({ name: 'studio', siteID, token });
+  }
+  return getStore('studio');
+}
 
+export const handler = async (event) => {
   if (event.httpMethod === 'OPTIONS') {
     return { statusCode: 204, headers: cors, body: '' };
+  }
+
+  let store;
+  try {
+    store = openStore();
+  } catch (e) {
+    return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'store init failed', detail: String(e && e.message || e) }) };
   }
 
   if (event.httpMethod === 'GET') {
@@ -40,17 +51,19 @@ export const handler = async (event) => {
     try { payload = JSON.parse(event.body || '{}'); }
     catch (e) { return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'bad json' }) }; }
 
-    // Connexion : on vérifie seulement le mot de passe, sans rien écrire
     if (payload && payload.verify === true) {
       return { statusCode: 200, headers: cors, body: JSON.stringify({ ok: true }) };
     }
 
-    // Sécurité minimale : on n'enregistre qu'un contenu bien formé
     if (!payload || !payload.config || !Array.isArray(payload.services)) {
       return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'invalid content' }) };
     }
 
-    await store.setJSON(KEY, payload);
+    try {
+      await store.setJSON(KEY, payload);
+    } catch (e) {
+      return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'save failed', detail: String(e && e.message || e) }) };
+    }
     return { statusCode: 200, headers: cors, body: JSON.stringify({ ok: true }) };
   }
 
