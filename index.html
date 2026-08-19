@@ -1679,6 +1679,8 @@ function vueNotifs(){
       <div class="admin-sec">Appareils abonnés</div>
       <div id="pushList" class="adm-mini">Chargement…</div>
       <button class="adm-add" style="margin-top:10px" onclick="testPush()">Envoyer une notification de test</button>
+      <button class="adm-add" onclick="diagnostic()">🔎 Diagnostic du serveur</button>
+      <div id="diagBox" class="adm-mini"></div>
     ` : `<div class="adm-msg err">Ce navigateur ne gère pas les notifications push. Sur iPhone, installez d'abord l'app sur l'écran d'accueil, puis rouvrez l'Espace hôte depuis l'app.</div>`}`;
 }
 
@@ -1709,10 +1711,29 @@ async function activerPush(){
       method:'POST', headers:{'Content-Type':'application/json','x-admin-token':adminToken},
       body: JSON.stringify({action:'subscribe', subscription: sub.toJSON(), nom: document.getElementById('pushNom').value || 'Hôte', ua: navigator.userAgent})
     });
-    if(!r.ok) throw new Error('http '+r.status);
+    if(!r.ok){
+      const j = await r.json().catch(()=>({}));
+      throw new Error((j.error||('http '+r.status)) + (j.detail? ' — '+j.detail : ''));
+    }
     pushMsg("✓ Cet appareil recevra les notifications de commande.", false);
     chargerAppareils();
   }catch(e){ pushMsg("Échec de l'activation : "+String(e.message||e), true); }
+}
+
+async function diagnostic(){
+  const box=document.getElementById('diagBox'); if(!box) return;
+  box.textContent = 'Analyse…';
+  try{
+    const r = await fetch(API_PUSH,{method:'POST',headers:{'Content-Type':'application/json','x-admin-token':adminToken},body:JSON.stringify({action:'diag'})});
+    const j = await r.json();
+    const v = j.variables||{};
+    const ligne = (k)=>`<div class="kv"><span class="k">${k}</span><span class="v">${v[k]?'✓ présente':'✗ MANQUANTE'}</span></div>`;
+    const okStock = j.stockage === 'ok';
+    box.innerHTML = `<div class="admin-row" style="margin-top:10px">
+      ${Object.keys(v).map(ligne).join('')}
+      <div class="adm-msg ${okStock?'ok':'err'}" style="margin-top:10px">Stockage (Netlify Blobs) : ${esc(j.stockage||'inconnu')}</div>
+    </div>`;
+  }catch(e){ box.textContent = "Diagnostic impossible : "+String(e.message||e); }
 }
 
 async function chargerAppareils(){

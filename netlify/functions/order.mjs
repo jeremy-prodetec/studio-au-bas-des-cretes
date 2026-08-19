@@ -68,6 +68,14 @@ async function notifier(store, titre, message) {
 }
 
 export const handler = async (event) => {
+  try {
+    return await router(event);
+  } catch (e) {
+    return json(500, { error: 'erreur interne', detail: String((e && e.message) || e).slice(0, 300) });
+  }
+};
+
+const router = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors, body: '' };
   if (event.httpMethod !== 'POST') return { statusCode: 405, headers: cors, body: 'Method Not Allowed' };
 
@@ -95,12 +103,12 @@ export const handler = async (event) => {
 
     if (body.action === 'done') {
       const maj = orders.map((o) => (o.id === body.id ? { ...o, traite: !o.traite } : o));
-      await store.setJSON(ORDERS, maj);
+      try { await store.setJSON(ORDERS, maj); } catch (e) { return json(500, { error: 'stockage indisponible' }); }
       return json(200, { ok: true, commandes: maj });
     }
 
     if (body.action === 'clear') {
-      await store.setJSON(ORDERS, []);
+      try { await store.setJSON(ORDERS, []); } catch (e) { return json(500, { error: 'stockage indisponible' }); }
       return json(200, { ok: true, commandes: [] });
     }
 

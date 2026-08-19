@@ -81,6 +81,14 @@ export async function sendToAll(payloadObj) {
 }
 
 export const handler = async (event) => {
+  try {
+    return await router(event);
+  } catch (e) {
+    return json(500, { error: 'erreur interne', detail: String((e && e.message) || e).slice(0, 300) });
+  }
+};
+
+const router = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors, body: '' };
 
   if (event.httpMethod === 'GET') {
@@ -102,28 +110,57 @@ export const handler = async (event) => {
 
   const action = body.action;
 
+  // --- diagnostic : quelles variables sont en place, le stockage répond-il ? ---
+  if (action === 'diag') {
+    const vars = {
+      ADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD,
+      NETLIFY_SITE_ID: !!process.env.NETLIFY_SITE_ID,
+      NETLIFY_API_TOKEN: !!process.env.NETLIFY_API_TOKEN,
+      VAPID_PUBLIC_KEY: !!process.env.VAPID_PUBLIC_KEY,
+      VAPID_PRIVATE_KEY: !!process.env.VAPID_PRIVATE_KEY,
+      VAPID_SUBJECT: !!process.env.VAPID_SUBJECT
+    };
+    let blobs = 'ok';
+    try {
+      await store.setJSON('diag', { t: new Date().toISOString() });
+      const relu = await store.get('diag', { type: 'json' });
+      if (!relu || !relu.t) blobs = 'écriture ok mais relecture vide';
+    } catch (e) {
+      blobs = 'ERREUR : ' + String((e && (e.name + ' — ' + e.message)) || e).slice(0, 300);
+    }
+    return json(200, { variables: vars, stockage: blobs });
+  }
+
   if (action === 'subscribe') {
     const sub = body.subscription;
     if (!sub || !sub.endpoint || !sub.keys) return json(400, { error: 'abonnement invalide' });
-    const subs = await readSubs(store);
-    const sansDoublon = subs.filter((s) => s.endpoint !== sub.endpoint);
-    sansDoublon.push({
-      nom: String(body.nom || 'Hôte').slice(0, 40),
-      endpoint: sub.endpoint,
-      p256dh: sub.keys.p256dh,
-      auth: sub.keys.auth,
-      ua: String(body.ua || '').slice(0, 160),
-      date: new Date().toISOString()
-    });
-    await store.setJSON(KEY, sansDoublon);
-    return json(200, { ok: true, appareils: sansDoublon.length });
+    try {
+      const subs = await readSubs(store);
+      const sansDoublon = subs.filter((s) => s.endpoint !== sub.endpoint);
+      sansDoublon.push({
+        nom: String(body.nom || 'Hôte').slice(0, 40),
+        endpoint: sub.endpoint,
+        p256dh: sub.keys.p256dh,
+        auth: sub.keys.auth,
+        ua: String(body.ua || '').slice(0, 160),
+        date: new Date().toISOString()
+      });
+      await store.setJSON(KEY, sansDoublon);
+      return json(200, { ok: true, appareils: sansDoublon.length });
+    } catch (e) {
+      return json(500, { error: 'stockage indisponible', detail: String((e && e.message) || e).slice(0, 300) });
+    }
   }
 
   if (action === 'unsubscribe') {
-    const subs = await readSubs(store);
-    const restants = subs.filter((s) => s.endpoint !== body.endpoint);
-    await store.setJSON(KEY, restants);
-    return json(200, { ok: true, appareils: restants.length });
+    try {
+      const subs = await readSubs(store);
+      const restants = subs.filter((s) => s.endpoint !== body.endpoint);
+      await store.setJSON(KEY, restants);
+      return json(200, { ok: true, appareils: restants.length });
+    } catch (e) {
+      return json(500, { error: 'stockage indisponible', detail: String((e && e.message) || e).slice(0, 300) });
+    }
   }
 
   if (action === 'list') {
