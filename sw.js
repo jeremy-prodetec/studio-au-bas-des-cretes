@@ -4,13 +4,14 @@
            2) recevoir les notifications push de l'hôte
    ============================================================ */
 
-const CACHE = 'studio-v3';
+const CACHE = 'studio-v4';
 const ASSETS = [
   './',
   './index.html',
   './manifest.json',
   './icon-192.png',
-  './icon-512.png'
+  './icon-512.png',
+  './badge-96.png'
 ];
 
 self.addEventListener('install', (e) => {
@@ -58,7 +59,8 @@ self.addEventListener('push', (event) => {
   const options = {
     body: d.message || '',
     icon: './icon-192.png',
-    badge: './icon-192.png',
+    // badge monochrome : c'est lui qui s'affiche dans la barre d'état Android
+    badge: './badge-96.png',
     tag: d.id || 'studio-commande',
     renotify: true,
     vibrate: d.urgent ? [90, 50, 90, 50, 90] : [70, 40, 70],
