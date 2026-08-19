@@ -1,0 +1,18 @@
+{
+  "name": "Studio Au Bas des Crêtes · La Ciotat",
+  "short_name": "Au Bas des Crêtes",
+  "description": "Votre séjour au studio : Wi-Fi, accès, services en option et bonnes adresses à La Ciotat.",
+  "lang": "fr",
+  "start_url": "./?src=pwa",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#FCF3E7",
+  "theme_color": "#003C54",
+  "categories": ["travel", "lifestyle"],
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

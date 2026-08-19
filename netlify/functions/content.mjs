@@ -51,11 +51,12 @@ export const handler = async (event) => {
     try { payload = JSON.parse(event.body || '{}'); }
     catch (e) { return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'bad json' }) }; }
 
+    // Simple vérification du mot de passe (le panneau admin s'en sert pour se connecter)
     if (payload && payload.verify === true) {
       return { statusCode: 200, headers: cors, body: JSON.stringify({ ok: true }) };
     }
 
-    if (!payload || !payload.config || !Array.isArray(payload.services)) {
+    if (!payload || typeof payload.config !== 'object' || !Array.isArray(payload.services)) {
       return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'invalid content' }) };
     }
 
