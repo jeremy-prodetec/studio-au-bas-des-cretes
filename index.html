@@ -1731,7 +1731,7 @@ async function diagnostic(){
     const okStock = j.stockage === 'ok';
     box.innerHTML = `<div class="admin-row" style="margin-top:10px">
       ${Object.keys(v).map(ligne).join('')}
-      <div class="adm-msg ${okStock?'ok':'err'}" style="margin-top:10px">Stockage (Netlify Blobs) : ${esc(j.stockage||'inconnu')}</div>
+      <div class="adm-msg ${okStock?'ok':'err'}" style="margin-top:10px">Stockage (Netlify Blobs) : ${esc(j.stockage||'inconnu')}${j.mode?' — accès '+esc(j.mode):''}</div>
     </div>`;
   }catch(e){ box.textContent = "Diagnostic impossible : "+String(e.message||e); }
 }

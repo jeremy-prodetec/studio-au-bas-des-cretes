@@ -2,15 +2,15 @@
 // Studio Au Bas des Crêtes — abonnements et envoi des notifications push
 // (Web Push / VAPID, même principe que l'app PRODETEC)
 //
-// GET                                   -> { publicKey }  (clé publique VAPID)
-// POST { action:'subscribe', ... }      -> enregistre un appareil (mot de passe requis)
-// POST { action:'unsubscribe', ... }    -> retire un appareil (mot de passe requis)
-// POST { action:'list' }                -> liste des appareils abonnés (mot de passe requis)
-// POST { action:'test' }                -> envoie une notification de test (mot de passe requis)
+// GET                                -> { publicKey }
+// POST { action:'subscribe', ... }   -> enregistre un appareil (mot de passe requis)
+// POST { action:'unsubscribe', ... } -> retire un appareil
+// POST { action:'list' }             -> liste des appareils abonnés
+// POST { action:'test' }             -> notification de test
+// POST { action:'diag' }             -> état des variables et du stockage
 //
-// Variables d'environnement Netlify :
-//   VAPID_PUBLIC_KEY / VAPID_PRIVATE_KEY / VAPID_SUBJECT (mailto:…)
-//   ADMIN_PASSWORD, NETLIFY_SITE_ID, NETLIFY_API_TOKEN
+// Variables Netlify : VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY, VAPID_SUBJECT,
+//                     ADMIN_PASSWORD (+ NETLIFY_SITE_ID / NETLIFY_API_TOKEN en secours)
 // ---------------------------------------------------------------------------
 import { getStore } from '@netlify/blobs';
 import webpush from 'web-push';
@@ -23,12 +23,33 @@ const cors = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
 };
 
-function openStore() {
+/* --- Accès au stockage Netlify Blobs, tolérant aux pannes ---------------
+   1) mode automatique (aucune variable à maintenir) ;
+   2) repli sur NETLIFY_SITE_ID + NETLIFY_API_TOKEN si le mode auto échoue.
+   Chaque opération essaie les deux avant d'abandonner.                     */
+function candidats() {
+  const out = [];
+  try { out.push(getStore('studio')); } catch (e) { /* environnement Blobs absent */ }
   const siteID = process.env.NETLIFY_SITE_ID;
   const token = process.env.NETLIFY_API_TOKEN;
-  if (siteID && token) return getStore({ name: 'studio', siteID, token });
-  return getStore('studio');
+  if (siteID && token) {
+    try { out.push(getStore({ name: 'studio', siteID, token })); } catch (e) { /* ignore */ }
+  }
+  return out;
 }
+
+async function avecStore(fn) {
+  const list = candidats();
+  if (!list.length) throw new Error('Netlify Blobs indisponible (aucune configuration exploitable)');
+  let derniere;
+  for (const st of list) {
+    try { return await fn(st); } catch (e) { derniere = e; }
+  }
+  throw derniere;
+}
+
+const lire = (cle) => avecStore((st) => st.get(cle, { type: 'json' }));
+const ecrire = (cle, valeur) => avecStore((st) => st.setJSON(cle, valeur));
 
 const json = (statusCode, data) => ({
   statusCode,
@@ -36,20 +57,18 @@ const json = (statusCode, data) => ({
   body: JSON.stringify(data)
 });
 
-async function readSubs(store) {
-  try { return (await store.get(KEY, { type: 'json' })) || []; } catch (e) { return []; }
+async function readSubs() {
+  try { return (await lire(KEY)) || []; } catch (e) { return []; }
 }
 
-// Envoi partagé avec la fonction "order"
-export async function sendToAll(payloadObj) {
+async function sendToAll(payloadObj) {
   const pub = process.env.VAPID_PUBLIC_KEY;
   const priv = process.env.VAPID_PRIVATE_KEY;
-  if (!pub || !priv) return { envoye: 0, erreur: 'Clés VAPID absentes' };
+  if (!pub || !priv) return { envoye: 0, erreur: 'cles VAPID absentes' };
 
   webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:contact@example.com', pub, priv);
 
-  const store = openStore();
-  const subs = await readSubs(store);
+  const subs = await readSubs();
   if (!subs.length) return { envoye: 0, raison: 'aucun appareil abonné' };
 
   const payload = JSON.stringify(payloadObj);
@@ -73,8 +92,7 @@ export async function sendToAll(payloadObj) {
   }
 
   if (morts.length) {
-    const restants = subs.filter((s) => !morts.includes(s.endpoint));
-    try { await store.setJSON(KEY, restants); } catch (e) { /* ignore */ }
+    try { await ecrire(KEY, subs.filter((s) => !morts.includes(s.endpoint))); } catch (e) { /* ignore */ }
   }
 
   return { envoye: ok, appareils: subs.length, nettoyes: morts.length, echecs };
@@ -105,37 +123,43 @@ const router = async (event) => {
   let body;
   try { body = JSON.parse(event.body || '{}'); } catch (e) { return json(400, { error: 'bad json' }); }
 
-  let store;
-  try { store = openStore(); } catch (e) { return json(500, { error: 'store init failed' }); }
-
   const action = body.action;
 
-  // --- diagnostic : quelles variables sont en place, le stockage répond-il ? ---
+  // --- diagnostic ---
   if (action === 'diag') {
     const vars = {
       ADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD,
-      NETLIFY_SITE_ID: !!process.env.NETLIFY_SITE_ID,
-      NETLIFY_API_TOKEN: !!process.env.NETLIFY_API_TOKEN,
       VAPID_PUBLIC_KEY: !!process.env.VAPID_PUBLIC_KEY,
       VAPID_PRIVATE_KEY: !!process.env.VAPID_PRIVATE_KEY,
-      VAPID_SUBJECT: !!process.env.VAPID_SUBJECT
+      VAPID_SUBJECT: !!process.env.VAPID_SUBJECT,
+      NETLIFY_SITE_ID: !!process.env.NETLIFY_SITE_ID,
+      NETLIFY_API_TOKEN: !!process.env.NETLIFY_API_TOKEN
     };
-    let blobs = 'ok';
+    let stockage = 'ok';
+    let mode = '';
     try {
-      await store.setJSON('diag', { t: new Date().toISOString() });
-      const relu = await store.get('diag', { type: 'json' });
-      if (!relu || !relu.t) blobs = 'écriture ok mais relecture vide';
+      // on note quel accès a fonctionné
+      const list = candidats();
+      let i = 0, reussi = -1, derniere;
+      for (const st of list) {
+        try { await st.setJSON('diag', { t: new Date().toISOString() }); reussi = i; break; }
+        catch (e) { derniere = e; i++; }
+      }
+      if (reussi < 0) throw derniere || new Error('aucun accès au stockage');
+      mode = reussi === 0 && list.length ? 'automatique' : 'via NETLIFY_API_TOKEN';
+      const relu = await lire('diag');
+      if (!relu || !relu.t) stockage = 'écriture ok mais relecture vide';
     } catch (e) {
-      blobs = 'ERREUR : ' + String((e && (e.name + ' — ' + e.message)) || e).slice(0, 300);
+      stockage = 'ERREUR : ' + String((e && (e.name + ' — ' + e.message)) || e).slice(0, 250);
     }
-    return json(200, { variables: vars, stockage: blobs });
+    return json(200, { variables: vars, stockage, mode });
   }
 
   if (action === 'subscribe') {
     const sub = body.subscription;
     if (!sub || !sub.endpoint || !sub.keys) return json(400, { error: 'abonnement invalide' });
     try {
-      const subs = await readSubs(store);
+      const subs = await readSubs();
       const sansDoublon = subs.filter((s) => s.endpoint !== sub.endpoint);
       sansDoublon.push({
         nom: String(body.nom || 'Hôte').slice(0, 40),
@@ -145,7 +169,7 @@ const router = async (event) => {
         ua: String(body.ua || '').slice(0, 160),
         date: new Date().toISOString()
       });
-      await store.setJSON(KEY, sansDoublon);
+      await ecrire(KEY, sansDoublon);
       return json(200, { ok: true, appareils: sansDoublon.length });
     } catch (e) {
       return json(500, { error: 'stockage indisponible', detail: String((e && e.message) || e).slice(0, 300) });
@@ -154,9 +178,9 @@ const router = async (event) => {
 
   if (action === 'unsubscribe') {
     try {
-      const subs = await readSubs(store);
+      const subs = await readSubs();
       const restants = subs.filter((s) => s.endpoint !== body.endpoint);
-      await store.setJSON(KEY, restants);
+      await ecrire(KEY, restants);
       return json(200, { ok: true, appareils: restants.length });
     } catch (e) {
       return json(500, { error: 'stockage indisponible', detail: String((e && e.message) || e).slice(0, 300) });
@@ -164,7 +188,7 @@ const router = async (event) => {
   }
 
   if (action === 'list') {
-    const subs = await readSubs(store);
+    const subs = await readSubs();
     return json(200, {
       appareils: subs.map((s) => ({ nom: s.nom, date: s.date, ua: s.ua, endpoint: s.endpoint }))
     });

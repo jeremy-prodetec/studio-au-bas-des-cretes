@@ -2,9 +2,9 @@
 // Studio Au Bas des Crêtes — réception des commandes et des demandes
 //
 // POST (public) { type:'commande'|'demande', ... }  -> enregistre + notifie l'hôte
-// POST { action:'list' }   (mot de passe)           -> journal des commandes
+// POST { action:'list' }     (mot de passe)         -> journal des commandes
 // POST { action:'done', id } (mot de passe)         -> marque comme traitée
-// POST { action:'clear' }  (mot de passe)           -> vide le journal
+// POST { action:'clear' }    (mot de passe)         -> vide le journal
 // ---------------------------------------------------------------------------
 import { getStore } from '@netlify/blobs';
 import webpush from 'web-push';
@@ -19,12 +19,33 @@ const cors = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS'
 };
 
-function openStore() {
+/* --- Accès au stockage Netlify Blobs, tolérant aux pannes ---------------
+   1) mode automatique (aucune variable à maintenir) ;
+   2) repli sur NETLIFY_SITE_ID + NETLIFY_API_TOKEN si le mode auto échoue.
+   Chaque opération essaie les deux avant d'abandonner.                     */
+function candidats() {
+  const out = [];
+  try { out.push(getStore('studio')); } catch (e) { /* environnement Blobs absent */ }
   const siteID = process.env.NETLIFY_SITE_ID;
   const token = process.env.NETLIFY_API_TOKEN;
-  if (siteID && token) return getStore({ name: 'studio', siteID, token });
-  return getStore('studio');
+  if (siteID && token) {
+    try { out.push(getStore({ name: 'studio', siteID, token })); } catch (e) { /* ignore */ }
+  }
+  return out;
 }
+
+async function avecStore(fn) {
+  const list = candidats();
+  if (!list.length) throw new Error('Netlify Blobs indisponible (aucune configuration exploitable)');
+  let derniere;
+  for (const st of list) {
+    try { return await fn(st); } catch (e) { derniere = e; }
+  }
+  throw derniere;
+}
+
+const lire = (cle) => avecStore((st) => st.get(cle, { type: 'json' }));
+const ecrire = (cle, valeur) => avecStore((st) => st.setJSON(cle, valeur));
 
 const json = (statusCode, data) => ({
   statusCode,
@@ -32,17 +53,18 @@ const json = (statusCode, data) => ({
   body: JSON.stringify(data)
 });
 
+// retire les caractères de contrôle et limite la longueur
 const clean = (v, max = 300) =>
   String(v == null ? '' : v).replace(/[\u0000-\u001F\u007F]/g, ' ').trim().slice(0, max);
 
-async function notifier(store, titre, message) {
+async function notifier(titre, message) {
   const pub = process.env.VAPID_PUBLIC_KEY;
   const priv = process.env.VAPID_PRIVATE_KEY;
   if (!pub || !priv) return { envoye: 0, erreur: 'cles VAPID absentes' };
   webpush.setVapidDetails(process.env.VAPID_SUBJECT || 'mailto:contact@example.com', pub, priv);
 
   let subs = [];
-  try { subs = (await store.get(SUBS, { type: 'json' })) || []; } catch (e) { subs = []; }
+  try { subs = (await lire(SUBS)) || []; } catch (e) { subs = []; }
   if (!subs.length) return { envoye: 0, raison: 'aucun appareil abonne' };
 
   const payload = JSON.stringify({ titre, message: message.slice(0, 300), url: './#admin', urgent: true });
@@ -62,7 +84,7 @@ async function notifier(store, titre, message) {
     }
   }
   if (morts.length) {
-    try { await store.setJSON(SUBS, subs.filter((s) => !morts.includes(s.endpoint))); } catch (e) {}
+    try { await ecrire(SUBS, subs.filter((s) => !morts.includes(s.endpoint))); } catch (e) { /* ignore */ }
   }
   return { envoye: ok, appareils: subs.length };
 }
@@ -78,17 +100,13 @@ export const handler = async (event) => {
 const router = async (event) => {
   if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors, body: '' };
   if (event.httpMethod !== 'POST') return { statusCode: 405, headers: cors, body: 'Method Not Allowed' };
-
   if ((event.body || '').length > 20000) return json(413, { error: 'trop volumineux' });
 
   let body;
   try { body = JSON.parse(event.body || '{}'); } catch (e) { return json(400, { error: 'bad json' }); }
 
-  let store;
-  try { store = openStore(); } catch (e) { return json(500, { error: 'store init failed' }); }
-
   const readOrders = async () => {
-    try { return (await store.get(ORDERS, { type: 'json' })) || []; } catch (e) { return []; }
+    try { return (await lire(ORDERS)) || []; } catch (e) { return []; }
   };
 
   // ---------- Actions réservées à l'hôte ----------
@@ -103,12 +121,12 @@ const router = async (event) => {
 
     if (body.action === 'done') {
       const maj = orders.map((o) => (o.id === body.id ? { ...o, traite: !o.traite } : o));
-      try { await store.setJSON(ORDERS, maj); } catch (e) { return json(500, { error: 'stockage indisponible' }); }
+      try { await ecrire(ORDERS, maj); } catch (e) { return json(500, { error: 'stockage indisponible' }); }
       return json(200, { ok: true, commandes: maj });
     }
 
     if (body.action === 'clear') {
-      try { await store.setJSON(ORDERS, []); } catch (e) { return json(500, { error: 'stockage indisponible' }); }
+      try { await ecrire(ORDERS, []); } catch (e) { return json(500, { error: 'stockage indisponible' }); }
       return json(200, { ok: true, commandes: [] });
     }
 
@@ -143,13 +161,12 @@ const router = async (event) => {
     traite: false
   };
 
-  if (type === 'commande' && !commande.lignes.length) {
-    return json(400, { error: 'commande vide' });
-  }
+  if (type === 'commande' && !commande.lignes.length) return json(400, { error: 'commande vide' });
 
   const orders = await readOrders();
   orders.unshift(commande);
-  try { await store.setJSON(ORDERS, orders.slice(0, MAX_ORDERS)); } catch (e) { /* on notifie quand même */ }
+  let enregistre = true;
+  try { await ecrire(ORDERS, orders.slice(0, MAX_ORDERS)); } catch (e) { enregistre = false; }
 
   // ---------- Notification push ----------
   let titre, message;
@@ -167,7 +184,7 @@ const router = async (event) => {
       (commande.message ? ' — ' + commande.message : '');
   }
 
-  const push = await notifier(store, titre, message || 'Voir le détail dans l’espace hôte.');
+  const push = await notifier(titre, message || 'Voir le détail dans l’espace hôte.');
 
-  return json(200, { ok: true, id: commande.id, push });
+  return json(200, { ok: true, id: commande.id, enregistre, push });
 };

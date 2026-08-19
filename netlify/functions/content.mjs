@@ -9,63 +9,85 @@ const cors = {
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
 };
 
-function openStore() {
+/* --- Accès au stockage Netlify Blobs, tolérant aux pannes ---------------
+   1) mode automatique (aucune variable à maintenir) ;
+   2) repli sur NETLIFY_SITE_ID + NETLIFY_API_TOKEN si le mode auto échoue.
+   Chaque opération essaie les deux avant d'abandonner.                     */
+function candidats() {
+  const out = [];
+  try { out.push(getStore('studio')); } catch (e) { /* environnement Blobs absent */ }
   const siteID = process.env.NETLIFY_SITE_ID;
   const token = process.env.NETLIFY_API_TOKEN;
   if (siteID && token) {
-    return getStore({ name: 'studio', siteID, token });
+    try { out.push(getStore({ name: 'studio', siteID, token })); } catch (e) { /* ignore */ }
   }
-  return getStore('studio');
+  return out;
 }
 
-export const handler = async (event) => {
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: cors, body: '' };
+async function avecStore(fn) {
+  const list = candidats();
+  if (!list.length) throw new Error('Netlify Blobs indisponible (aucune configuration exploitable)');
+  let derniere;
+  for (const st of list) {
+    try { return await fn(st); } catch (e) { derniere = e; }
   }
+  throw derniere;
+}
 
-  let store;
+const lire = (cle) => avecStore((st) => st.get(cle, { type: 'json' }));
+const ecrire = (cle, valeur) => avecStore((st) => st.setJSON(cle, valeur));
+
+const json = (statusCode, data) => ({
+  statusCode,
+  headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
+  body: JSON.stringify(data)
+});
+
+export const handler = async (event) => {
   try {
-    store = openStore();
+    return await router(event);
   } catch (e) {
-    return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'store init failed', detail: String(e && e.message || e) }) };
+    return json(500, { error: 'erreur interne', detail: String((e && e.message) || e).slice(0, 300) });
   }
+};
+
+const router = async (event) => {
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors, body: '' };
 
   if (event.httpMethod === 'GET') {
-    let data = null;
-    try { data = await store.get(KEY, { type: 'json' }); } catch (e) { data = null; }
-    return {
-      statusCode: 200,
-      headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': 'no-store' },
-      body: JSON.stringify(data ?? null)
-    };
+    // ?debug=1 renvoie l'erreur de stockage au lieu de la masquer
+    const debug = /[?&]debug=1/.test(event.rawQuery || event.rawUrl || '');
+    try {
+      const data = await lire(KEY);
+      return json(200, data ?? null);
+    } catch (e) {
+      if (debug) return json(500, { error: 'stockage indisponible', detail: String((e && e.message) || e).slice(0, 300) });
+      return json(200, null); // l'app garde ses valeurs par défaut
+    }
   }
 
   if (event.httpMethod === 'POST') {
     const token = event.headers['x-admin-token'];
-    const ok = process.env.ADMIN_PASSWORD && token === process.env.ADMIN_PASSWORD;
-    if (!ok) {
-      return { statusCode: 401, headers: cors, body: JSON.stringify({ error: 'unauthorized' }) };
+    if (!process.env.ADMIN_PASSWORD || token !== process.env.ADMIN_PASSWORD) {
+      return json(401, { error: 'unauthorized' });
     }
 
     let payload;
     try { payload = JSON.parse(event.body || '{}'); }
-    catch (e) { return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'bad json' }) }; }
+    catch (e) { return json(400, { error: 'bad json' }); }
 
-    // Simple vérification du mot de passe (le panneau admin s'en sert pour se connecter)
-    if (payload && payload.verify === true) {
-      return { statusCode: 200, headers: cors, body: JSON.stringify({ ok: true }) };
-    }
+    if (payload && payload.verify === true) return json(200, { ok: true });
 
     if (!payload || typeof payload.config !== 'object' || !Array.isArray(payload.services)) {
-      return { statusCode: 400, headers: cors, body: JSON.stringify({ error: 'invalid content' }) };
+      return json(400, { error: 'invalid content' });
     }
 
     try {
-      await store.setJSON(KEY, payload);
+      await ecrire(KEY, payload);
     } catch (e) {
-      return { statusCode: 500, headers: cors, body: JSON.stringify({ error: 'save failed', detail: String(e && e.message || e) }) };
+      return json(500, { error: 'enregistrement impossible', detail: String((e && e.message) || e).slice(0, 300) });
     }
-    return { statusCode: 200, headers: cors, body: JSON.stringify({ ok: true }) };
+    return json(200, { ok: true });
   }
 
   return { statusCode: 405, headers: cors, body: 'Method Not Allowed' };
